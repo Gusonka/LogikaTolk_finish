@@ -1,0 +1,246 @@
+import threading
+from socket import *
+from customtkinter import *
+from tkinter import filedialog
+from PIL import Image, ImageTk
+import base64
+import io
+
+MENU_WIDTH = 200
+ANIMATION_DELAY_MS = 10
+ANIMATION_STEP = 20
+
+MESSAGE_TYPE_TEXT = "TEXT"
+MESSAGE_TYPE_IMAGE = "IMAGE"
+DATA_SEPARATOR = "###IMAGE_DATA###"
+
+
+class MainWindow(CTk):
+    def __init__(self):
+        super().__init__()
+        self.geometry("600x400")
+        self.title("LOGIKATALK")
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=1)
+
+        self.image_references = []
+
+        self.sidebar_frame = CTkFrame(self, width=0)
+        self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
+        self.is_menu_open = False
+        self.current_menu_width = 0
+
+        self.label = CTkLabel(self.sidebar_frame, text="Нікнейм", font=CTkFont(size=14, weight="bold"))
+        self.label.grid(row=0, column=0, padx=20, pady=(20, 0), sticky="n")
+
+        self.entry = CTkEntry(self.sidebar_frame, placeholder_text="Введіть нік...")
+        self.entry.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
+        self.entry.bind("<Return>", self.set_username_from_entry)
+
+        self.btn_toggle_menu = CTkButton(self, text="▶️", command=self.toggle_menu, width=30)
+        self.btn_toggle_menu.place(x=0, y=0)
+
+        self.chat_frame = CTkFrame(self)
+        self.chat_frame.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+        self.chat_frame.grid_rowconfigure(0, weight=1)
+        self.chat_frame.grid_columnconfigure(0, weight=1)
+
+        self.chat_text = CTkTextbox(self.chat_frame, state="disabled")
+        self.chat_text.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 5), sticky="nsew")
+
+        self.input_frame = CTkFrame(self.chat_frame, fg_color="transparent")
+        self.input_frame.grid(row=1, column=0, columnspan=2, sticky="ew")
+        self.input_frame.grid_columnconfigure(1, weight=1)
+
+        self.image_button = CTkButton(self.input_frame, text="🖼️", width=30, height=30, command=self.select_image)
+        self.image_button.grid(row=0, column=0, padx=(10, 5), pady=(5, 10), sticky="w")
+
+        self.message_input = CTkEntry(self.input_frame, placeholder_text="Введіть повідомлення:")
+        self.message_input.grid(row=0, column=1, padx=(0, 5), pady=(5, 10), sticky="ew")
+        self.message_input.bind("<Return>", lambda event: self.send_message())
+
+        self.send_button = CTkButton(self.input_frame, text="▶️", width=30, height=30, command=self.send_message)
+        self.send_button.grid(row=0, column=2, padx=(0, 10), pady=(5, 10), sticky="e")
+
+        self.username = "User"
+
+        try:
+            self.sock = socket(AF_INET, SOCK_STREAM)
+            self.sock.connect(("localhost", 8080))
+            self.add_message(f"[СИСТЕМА] Підключено до сервера.")
+            hello = f"{MESSAGE_TYPE_TEXT}@{self.username}@[SYSTEM] {self.username} приєднався(лась) до чату!\n"
+            self.sock.send(hello.encode("utf-8"))
+            threading.Thread(target=self.recv_message, daemon=True).start()
+        except Exception as e:
+            self.add_message(f"[СИСТЕМА] Не вдалося підключитися: {e}")
+            self.sock = None
+
+    def select_image(self):
+        file_path = filedialog.askopenfilename(
+            title="Вибрати зображення",
+            filetypes=(("Зображення", "*.png *.jpg *.jpeg"), ("Усі файли", "*.*"))
+        )
+        if file_path:
+            try:
+                with open(file_path, "rb") as image_file:
+                    image_data = image_file.read()
+
+                encoded_image = base64.b64encode(image_data).decode('utf-8')
+
+                filename = file_path.split('/')[-1]
+
+                data = f"{MESSAGE_TYPE_IMAGE}@{self.username}@{filename}{DATA_SEPARATOR}{encoded_image}\n"
+
+                self.display_image(self.username, filename, encoded_image)
+
+                if self.sock:
+                    self.sock.sendall(data.encode())
+
+            except Exception as e:
+                self.add_message(f"[ПОМИЛКА] Не вдалося відправити зображення: {e}")
+
+    def display_image(self, sender, filename, encoded_image):
+        try: 
+            image_data = base64.b64decode(encoded_image)
+            image = Image.open(io.BytesIO(image_data))
+
+            max_size = 200
+            if image.width > max_size or image.height > max_size:
+                image.thumbnail((max_size, max_size))
+
+            photo = ImageTk.PhotoImage(image)
+
+            self.chat_text.configure(state="normal")
+            self.chat_text.insert(END, f"[{sender}]: [ЗОБРАЖЕННЯ: {filename}]\n")
+            self.chat_text.image_create(END, image=photo)
+            self.chat_text.insert(END, "\n")
+
+            self.image_references.append(photo)
+
+            self.chat_text.see(END)
+            self.chat_text.configure(state="disabled")
+
+        except Exception as e:
+            self.add_message(f"[ПОМИЛКА ВІДОБРАЖЕННЯ ЗОБРАЖЕННЯ] {e}")
+
+    def add_message(self, text):
+        self.chat_text.configure(state="normal")
+        self.chat_text.insert(END, text + "\n")
+        self.chat_text.see(END)
+        self.chat_text.configure(state="disabled")
+
+    def send_message(self):
+        message = self.message_input.get()
+        if message:
+            self.add_message(f"{self.username}: {message}")
+            data = f"{MESSAGE_TYPE_TEXT}@{self.username}@{message}\n"
+            try:
+                if self.sock:
+                    self.sock.sendall(data.encode())
+            except Exception as e:
+                self.add_message(f"[ПОМИЛКА] Не вдалося відправити повідомлення: {e}")
+        self.message_input.delete(0, END)
+
+    def recv_message(self):
+        buffer = ""
+        while True:
+            try:
+                chunk = self.sock.recv(16384)
+                if not chunk:
+                    break
+                buffer += chunk.decode()
+
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    line = line.strip()
+
+                    if line.startswith(MESSAGE_TYPE_IMAGE) and DATA_SEPARATOR in line:
+                        try:
+                            parts = line.split("@", 2)
+                            if len(parts) >= 3:
+                                sender = parts[1]
+                                content = parts[2]
+                                filename, encoded_image = content.split(DATA_SEPARATOR, 1)
+
+                                if sender != self.username:
+                                    self.display_image(sender, filename, encoded_image)
+                                continue
+                        except Exception as e:
+                            self.add_message(f"[СИСТЕМА] Помилка парсингу зображення: {e}")
+
+                    parts = line.split("@", 2)
+                    if len(parts) >= 3:
+                        msg_type = parts[0]
+                        sender = parts[1]
+                        content = parts[2]
+
+                        if sender != self.username or content.startswith("[SYSTEM]"):
+                            if msg_type == MESSAGE_TYPE_TEXT:
+                                self.add_message(f"{sender}: {content}")
+                    else:
+                        self.add_message(line)
+
+            except Exception as e:
+                self.add_message(f"[СИСТЕМА] З'єднання розірвано. {e}")
+                break
+        if self.sock:
+            self.sock.close()
+
+    def set_username_from_entry(self, event=None):
+        new_username = self.entry.get().strip()
+        if new_username:
+            if self.sock:
+                old_username = self.username
+                system_msg = f"[SYSTEM] Нікнейм {old_username} змінено на {new_username}"
+                data = f"{MESSAGE_TYPE_TEXT}@[SYSTEM]@{system_msg}\n"
+                try:
+                    self.sock.sendall(data.encode("utf-8"))
+                except:
+                    pass
+
+            self.username = new_username
+            self.label.configure(text=f"Нікнейм: {self.username}")
+            self.add_message(f"[СИСТЕМА] Ваш нікнейм змінено на {self.username}")
+
+    def toggle_menu(self):
+        self.is_menu_open = not self.is_menu_open
+        self.btn_toggle_menu.configure(text="◀️" if self.is_menu_open else "▶️")
+        self.animate_menu()
+
+    def animate_menu(self):
+        if self.is_menu_open:
+            target_width = MENU_WIDTH
+            step = ANIMATION_STEP
+
+            if self.current_menu_width < target_width:
+                self.current_menu_width = min(self.current_menu_width + step, target_width)
+                self.sidebar_frame.configure(width=self.current_menu_width)
+
+                self.btn_toggle_menu.place(x=self.current_menu_width, y=0)
+                self.after(ANIMATION_DELAY_MS, self.animate_menu)
+            else:
+                self.sidebar_frame.grid_columnconfigure(0, weight=1)
+                self.sidebar_frame.configure(width=MENU_WIDTH)
+
+        else:
+            target_width = 0
+            step = ANIMATION_STEP
+
+            if self.current_menu_width > target_width:
+                self.current_menu_width = max(self.current_menu_width - step, target_width)
+                self.sidebar_frame.configure(width=self.current_menu_width)
+
+                self.btn_toggle_menu.place(x=self.current_menu_width, y=0)
+                self.after(ANIMATION_DELAY_MS, self.animate_menu)
+            else:
+                self.sidebar_frame.grid_columnconfigure(0, weight=0)
+                self.sidebar_frame.configure(width=0)
+                self.btn_toggle_menu.place(x=0, y=0)
+
+
+if __name__ == "__main__":
+    set_widget_scaling(1.0)
+
+    set_appearance_mode("System")
+    win = MainWindow()
+    win.mainloop()
